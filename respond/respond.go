@@ -6,6 +6,8 @@ import (
 	"log"
 	"fmt"
 	"crypto/md5"
+	"io"
+	"bytes"
 )
 
 var (
@@ -17,6 +19,20 @@ var (
 func init() {
 	options   = make(map[*http.Request]*Options)
 	responded = make(map[*http.Request]bool)
+}
+
+type ReadHasher interface {
+	io.Reader
+	Hash() []byte
+}
+
+type rhImpl struct {
+	io.Reader
+	hash []byte
+}
+
+func (rh *rhImpl) Hash() []byte {
+	return rh.hash
 }
 
 type Options struct {
@@ -67,63 +83,72 @@ func about(r *http.Request) (opts *Options, multiple bool) {
 	return opts, multiple
 }
 
-func with(w http.ResponseWriter, r *http.Request, status int, data interface{}, opts *Options, multiple bool) {
+func with(w http.ResponseWriter, r *http.Request, status int, in io.Reader, headers []string, opts *Options, multiple bool) {
 	if opts != nil && multiple && !opts.AllowMultiple {
 		panic("respond: multiple responses")
 	}
 
-	encoder := JSON
-	if opts != nil {
-		if opts.Before != nil {
-			status, data = opts.Before(w, r, status, data)
-		}
+	if hasher, ok := in.(ReadHasher); ok {
+		if status >= 200 && status < 300 {
+			etag := fmt.Sprintf("\"%s\"", hasher.Hash())
 
-		if opts.Encoder != nil {
-			encoder = opts.Encoder
+			w.Header().Set("Etag", etag)
+
+			if match := r.Header.Get("if-none-match"); match == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 		}
 	}
 
-	out, err := encoder.Encode(data)
-	if err != nil {
-		opts.log(err)
-		return
+	for i := 0; i < len(headers)/2; i++ {
+		w.Header().Set(headers[i*2], headers[i*2 + 1])
 	}
 
-	if status >= 200 && status < 300 {
-		etag := fmt.Sprintf("\"%x\"", md5.Sum(out))
+	w.WriteHeader(status)
+	io.Copy(w, in)
+}
 
-		w.Header().Set("Etag", etag)
+func With(w http.ResponseWriter, r *http.Request, status int, data interface{}, headers ...string) {
+	opts, multiple := about(r)
 
-		if match := r.Header.Get("if-none-match"); match == etag {
-			w.WriteHeader(http.StatusNotModified)
+	var out []byte
+	if bs, ok := data.([]byte); ok {
+		out = bs
+	} else {
+		encoder := JSON
+		if opts != nil {
+			if opts.Before != nil {
+				status, data = opts.Before(w, r, status, data)
+			}
+
+			if opts.Encoder != nil {
+				encoder = opts.Encoder
+			}
+		}
+
+		bs, err := encoder.Encode(data)
+		if err != nil {
+			opts.log(err)
 			return
 		}
+
+		headers = append(headers, "Content-Type", encoder.ContentType())
+		out = bs
 	}
 
-	w.Header().Set("Content-Type", encoder.ContentType())
-	w.WriteHeader(status)
-	w.Write(out)
+	with(w, r, status, &rhImpl{bytes.NewBuffer(out), md5.New().Sum(out)}, headers, opts, multiple)
 }
 
-func With(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+func WithReader(w http.ResponseWriter, r *http.Request, status int, reader io.Reader, headers ...string) {
 	opts, multiple := about(r)
-
-	with(w, r, status, data, opts, multiple)
+	with(w, r, status, reader, headers, opts, multiple)
 }
 
-func WithStatus(w http.ResponseWriter, r *http.Request, status int) {
-	opts, multiple := about(r)
-
-	var data interface{}
-	if opts != nil && opts.StatusFunc != nil {
-		data = opts.StatusFunc(w, r, status)
-	} else {
-		const (
-			fieldStatus = "status"
-			fieldCode   = "code"
-		)
-		data = map[string]interface{}{fieldStatus: http.StatusText(status), fieldCode: status}
-	}
-
-	with(w, r, status, data, opts, multiple)
+func WithStatus(w http.ResponseWriter, r *http.Request, status int, headers ...string) {
+	const (
+		fieldStatus = "status"
+		fieldCode   = "code"
+	)
+	With(w, r, status, map[string]interface{}{fieldStatus: http.StatusText(status), fieldCode: status}, headers...)
 }
