@@ -3,7 +3,10 @@
 // The math is done manually, so values are not restricted by system maximums
 package baseconv
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 var ErrDuplicateCharacter = fmt.Errorf("duplicate character")
 
@@ -50,6 +53,12 @@ func (bm *BaseMap) Parse(input string) (*Number, error) {
 type Number struct {
 	vals []int
 	bmap *BaseMap
+}
+
+// Int64 returns the int64 value of the number as long as it is within 64 bits
+func (num *Number) Int64() int64 {
+	intVal, _ := strconv.ParseInt(num.Format(Base10), 10, 64)
+	return intVal
 }
 
 // Format converts the number to a numeric string according to the given basemap
